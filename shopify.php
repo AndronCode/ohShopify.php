@@ -1,22 +1,26 @@
 <?php
 class ShopifyClient {
 	public $shop_domain;
-	private $token;
+	public $token;
 	private $api_key;
 	private $secret;
 	private $last_response_headers = null;
+	public  $debug;
 
-	public function __construct($shop_domain, $token, $api_key, $secret) {
+	public function __construct($shop_domain, $api_key,  $secret, $token = null) {
 		$this->name = "ShopifyClient";
+
+		// make simple check ;
 		$this->shop_domain = $shop_domain;
 		$this->token = $token;
 		$this->api_key = $api_key;
 		$this->secret = $secret;
+		$this->debug  = false;
 	}
 
 	// Get the URL required to request authorization
 	public function getAuthorizeUrl($scope, $redirect_url='') {
-		$url = "https://{$this->shop_domain}/admin/oauth/authorize?client_id={$this->api_key}&scope=" . urlencode($scope);
+		$url = "https://{$this->shop_domain}/admin/oauth/authorize?client_id={$this->api_key}&scope=" . urlencode($scope); 
 		if ($redirect_url != '')
 		{
 			$url .= "&redirect_uri=" . urlencode($redirect_url);
@@ -28,9 +32,11 @@ class ShopifyClient {
 	public function getAccessToken($code) {
 		// POST to  POST https://SHOP_NAME.myshopify.com/admin/oauth/access_token
 		$url = "https://{$this->shop_domain}/admin/oauth/access_token";
-		$payload = "client_id={$this->api_key}&client_secret={$this->secret}&code=$code";
+		$payload = "client_id={$this->api_key}&client_secret={$this->secret}&code={$code}";
+		echo "Payload :". $payload;  // New
 		$response = $this->curlHttpApiRequest('POST', $url, '', $payload, array());
 		$response = json_decode($response, true);
+		echo "<p>Accees Token fron Shopify client:" . var_dump($response). "</p>";
 		if (isset($response['access_token']))
 			return $response['access_token'];
 		return '';
@@ -51,17 +57,31 @@ class ShopifyClient {
 		return $this->callLimit() - $this->callsMade();
 	}
 
-	public function call($method, $path, $params=array())
+	// NEW!! $params is json format;
+	/**
+	 * 
+	 * return Associiated array
+	 */
+	public function call($method, $path, $params="")
 	{
 		$baseurl = "https://{$this->shop_domain}/";
 	
 		$url = $baseurl.ltrim($path, '/');
-		$query = in_array($method, array('GET','DELETE')) ? $params : array();
-		$payload = in_array($method, array('POST','PUT')) ? json_encode($params) : array();
-		$request_headers = in_array($method, array('POST','PUT')) ? array("Content-Type: application/json; charset=utf-8", 'Expect:') : array();
+		$query = in_array($method, array('GET','DELETE')) ? $params : "";
+		$payload = in_array($method, array('POST','PUT')) ? $params : "";
+		$request_headers = in_array($method, array('POST','PUT')) ? array("Content-Type: application/json; charset=utf-8", 'Expect: application/json') : array();
 
 		// add auth headers
 		$request_headers[] = 'X-Shopify-Access-Token: ' . $this->token;
+
+		if($this->debug)
+			{
+				echo "<h5> Payload: ". $payload. " and query: ".$query ."</h5>";
+				foreach($request_headers as $header)
+					{
+						echo "<h5> Header is: ".$header . " </h5>";
+					}
+			}
 
 		$response = $this->curlHttpApiRequest($method, $url, $query, $payload, $request_headers);
 		$response = json_decode($response, true);
@@ -72,6 +92,11 @@ class ShopifyClient {
 		return (is_array($response) and (count($response) > 0)) ? array_shift($response) : $response;
 	}
 
+	// New method to cal GraphQL (October 2019)
+
+	
+
+
 	public function validateSignature($query)
 	{
 		if(!is_array($query) || empty($query['hmac']) || !is_string($query['hmac']))
@@ -79,6 +104,7 @@ class ShopifyClient {
 
 		$dataString = array();
 		foreach ($query as $key => $value) {
+			if(!in_array($key, array('shop', 'timestamp', 'code'))) continue;
 
 			$key = str_replace('=', '%3D', $key);
 			$key = str_replace('&', '%26', $key);
@@ -86,29 +112,36 @@ class ShopifyClient {
 
 			$value = str_replace('&', '%26', $value);
 			$value = str_replace('%', '%25', $value);
-			
-			if($key != 'hmac')
-				$dataString[] = $key . '=' . $value;
+
+			$dataString[] = $key . '=' . $value;
 		}
-		
 		sort($dataString);
 		
 		$string = implode("&", $dataString);
 
-		if (version_compare(PHP_VERSION, '5.3.0', '>='))
-			$signature = hash_hmac('sha256', $string, $this->secret);
-		else
-			$signature = bin2hex(mhash(MHASH_SHA256, $string, $this->secret));
-				
+		$signatureBin = mhash(MHASH_SHA256, $string, $this->secret);
+		$signature = bin2hex($signatureBin);
+		
 		return $query['hmac'] == $signature;
 	}
 
 	private function curlHttpApiRequest($method, $url, $query='', $payload='', $request_headers=array())
 	{
 		$url = $this->curlAppendQuery($url, $query);
+		if ($this->debug)
+			echo "</br> URL is : ". $url;
 		$ch = curl_init($url);
 		$this->curlSetopts($ch, $method, $payload, $request_headers);
 		$response = curl_exec($ch);
+		// new to get array of info ;
+		if ($this->debug)
+		{
+			foreach (curl_getinfo($ch)  as $k => $value)
+				{
+					echo "<p> ". $k ." value is ". $value. "</p>";
+				}
+		}
+			
 		$errno = curl_errno($ch);
 		$error = curl_error($ch);
 		curl_close($ch);
@@ -133,8 +166,8 @@ class ShopifyClient {
 		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 		curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
 		curl_setopt($ch, CURLOPT_MAXREDIRS, 3);
-		curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-		curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+		curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);  // Modifed to not get issue certificate;
+		curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);  // was 2 -  check the existence of a common name and also verify that it matches the hostname provided
 		curl_setopt($ch, CURLOPT_USERAGENT, 'ohShopify-php-api-client');
 		curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 30);
 		curl_setopt($ch, CURLOPT_TIMEOUT, 30);
@@ -144,7 +177,10 @@ class ShopifyClient {
 		
 		if ($method != 'GET' && !empty($payload))
 		{
-			if (is_array($payload)) $payload = http_build_query($payload);
+			if (is_array($payload))
+			 $payload = http_build_query($payload);
+			echo "Payload from Shopify client: ";
+			var_dump($payload);
 			curl_setopt ($ch, CURLOPT_POSTFIELDS, $payload);
 		}
 	}
